@@ -1,9 +1,9 @@
 {
-  "name": "Mantis障害数据-全量初始化同步",
+  "name": "Mantis障害数据-全量初始化同步_SUCCESS_V1",
   "nodes": [
     {
       "parameters": {},
-      "id": "fe402573-def2-4d2c-81fb-07e84b440b7a",
+      "id": "4906b85d-41f8-4ace-b449-cba94e489032",
       "name": "手动触发",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
@@ -18,7 +18,7 @@
         "query": "INSERT INTO mantis.sync_log (sync_type, sync_status, start_time) VALUES ('FULL', 'RUNNING', NOW()) RETURNING id as sync_log_id;",
         "options": {}
       },
-      "id": "98b76ce7-a1a5-4197-a71d-f1e19881390f",
+      "id": "f2f11797-0019-43cf-9fe6-4c481217837e",
       "name": "创建同步日志",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -40,7 +40,7 @@
         "query": "WITH target_bugs AS (\n  SELECT id\n  FROM mantis_bug_table\n  WHERE status = 85\n  ORDER BY id\n  LIMIT 1000 OFFSET {{ $json.offset || 0 }}\n),\nlatest_history AS (\n  SELECT\n    bug_id,\n    field_name,\n    new_value,\n    ROW_NUMBER() OVER (PARTITION BY bug_id, field_name ORDER BY date_modified DESC, id DESC) AS rn\n  FROM mantis_bug_history_table\n  WHERE bug_id IN (SELECT id FROM target_bugs)\n    AND field_name IN (\n      '確認者(テスト)', '確認日(テスト)',\n      '調査者', '調査日',\n      '修正者', '修正日',\n      'バグ分類', 'バグ区分', '関連コマンド',\n      '原因区分(大)', '原因区分(小)',\n      '障害発生原因', '修正内容'\n    )\n),\nhistory_pivot AS (\n  SELECT\n    bug_id,\n    MAX(CASE WHEN field_name = '確認者(テスト)' THEN new_value END) AS test_confirmer_name,\n    MAX(CASE WHEN field_name = '確認日(テスト)' THEN new_value END) AS test_confirmed_ts,\n    MAX(CASE WHEN field_name = '調査者' THEN new_value END) AS investigator,\n    MAX(CASE WHEN field_name = '調査日' THEN new_value END) AS investigated_ts,\n    MAX(CASE WHEN field_name = '修正者' THEN new_value END) AS fixer,\n    MAX(CASE WHEN field_name = '修正日' THEN new_value END) AS fixed_ts,\n    MAX(CASE WHEN field_name = 'バグ分類' THEN new_value END) AS bug_category_jp,\n    MAX(CASE WHEN field_name = 'バグ区分' THEN new_value END) AS bug_classification,\n    MAX(CASE WHEN field_name = '関連コマンド' THEN new_value END) AS related_command,\n    MAX(CASE WHEN field_name = '原因区分(大)' THEN new_value END) AS cause_large,\n    MAX(CASE WHEN field_name = '原因区分(小)' THEN new_value END) AS cause_small,\n    MAX(CASE WHEN field_name = '障害発生原因' THEN new_value END) AS root_cause_text,\n    MAX(CASE WHEN field_name = '修正内容' THEN new_value END) AS fix_detail_text\n  FROM latest_history\n  WHERE rn = 1\n  GROUP BY bug_id\n)\nSELECT\n  b.id AS bug_id,\n  LPAD(CAST(b.id AS CHAR), 7, '0') AS bug_no_for_ui,\n  p.name AS project_name,\n  CASE b.view_state\n    WHEN 10 THEN '公開'\n    WHEN 50 THEN '非公開'\n    ELSE CONCAT('view_state_', b.view_state)\n  END AS view_state_name,\n  FROM_UNIXTIME(b.date_submitted) AS registered_at,\n  FROM_UNIXTIME(b.last_updated) AS last_updated_at,\n\n  CONCAT_WS('_', hu.username, hu.realname) AS handler_display,\n  CONCAT_WS('_', ru.username, ru.realname) AS reporter_display,\n\n  CASE b.status\n    WHEN 10 THEN 'new'\n    WHEN 20 THEN 'feedback'\n    WHEN 30 THEN 'acknowledged'\n    WHEN 40 THEN 'confirmed'\n    WHEN 50 THEN 'assigned'\n    WHEN 77 THEN '調査中'\n    WHEN 78 THEN '修正中'\n    WHEN 80 THEN 'resolved'\n    WHEN 85 THEN '確認済'\n    WHEN 90 THEN 'closed'\n    ELSE CAST(b.status AS CHAR)\n  END AS status_name,\n\n  CASE b.priority\n    WHEN 10 THEN 'none'\n    WHEN 20 THEN 'low'\n    WHEN 30 THEN 'normal'\n    WHEN 40 THEN 'high'\n    WHEN 50 THEN 'urgent'\n    WHEN 60 THEN 'immediate'\n    ELSE CAST(b.priority AS CHAR)\n  END AS priority_name,\n\n  CASE b.severity\n    WHEN 10 THEN 'feature'\n    WHEN 20 THEN 'trivial'\n    WHEN 30 THEN 'text'\n    WHEN 40 THEN 'tweak'\n    WHEN 50 THEN 'minor'\n    WHEN 60 THEN 'major'\n    WHEN 70 THEN 'crash'\n    WHEN 80 THEN 'block'\n    ELSE CAST(b.severity AS CHAR)\n  END AS severity_name,\n\n  b.reproducibility,\n  b.summary,\n  bt.description AS detail_description,\n  c.name AS category_name,\n\n  hp.investigator,\n  FROM_UNIXTIME(CAST(hp.investigated_ts AS UNSIGNED)) AS investigated_at,\n  hp.fixer,\n  FROM_UNIXTIME(CAST(hp.fixed_ts AS UNSIGNED)) AS fixed_at,\n  NULLIF(TRIM(hp.bug_category_jp), '') AS bug_category_jp,\n  NULLIF(TRIM(hp.bug_classification), '') AS bug_classification,\n  NULLIF(TRIM(hp.related_command), '') AS related_command,\n  NULLIF(TRIM(hp.cause_large), '') AS cause_large,\n  NULLIF(TRIM(hp.cause_small), '') AS cause_small,\n  hp.root_cause_text,\n  hp.fix_detail_text\nFROM target_bugs tb\nJOIN mantis_bug_table b ON b.id = tb.id\nLEFT JOIN mantis_project_table p   ON p.id = b.project_id\nLEFT JOIN mantis_user_table hu     ON hu.id = b.handler_id\nLEFT JOIN mantis_user_table ru     ON ru.id = b.reporter_id\nLEFT JOIN mantis_bug_text_table bt ON bt.id = b.bug_text_id\nLEFT JOIN mantis_category_table c  ON c.id = b.category_id\nLEFT JOIN history_pivot hp         ON hp.bug_id = b.id\nORDER BY b.id;",
         "options": {}
       },
-      "id": "878a0569-06d3-42bd-8b7d-5116c2590a20",
+      "id": "5a918f94-d2e2-4e7e-859d-08dd20d09cd5",
       "name": "分批查询源数据",
       "type": "n8n-nodes-base.mySql",
       "typeVersion": 2.1,
@@ -63,13 +63,12 @@
           "number": [
             {
               "value1": "={{ $items(\"分批查询源数据\").length }}",
-              "operation": "larger",
-              "value2": 0
+              "operation": "larger"
             }
           ]
         }
       },
-      "id": "139d3915-85e9-465c-9454-973e1a8905ff",
+      "id": "077848a0-0b45-4700-a7ab-80c9bebb7daf",
       "name": "判断是否有数据",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
@@ -82,7 +81,7 @@
       "parameters": {
         "jsCode": "// 丰富数据：为每条记录添加统计信息\nconst items = $input.all();\nconst enrichedItems = [];\n\nfor (const item of items) {\n  const bugId = item.json.bug_id;\n  \n  try {\n    // 查询标签信息（需要在n8n中配置额外的查询节点，这里简化处理）\n    // 实际使用时，可以通过HTTP请求或额外的MySQL查询获取\n    \n    const enrichedData = {\n      ...item.json,\n      // 添加同步时间戳\n      synced_at: new Date().toISOString().slice(0, 19).replace('T', ' '),\n      data_version: 1,\n      is_deleted: 0,\n      // 这里可以添加更多计算字段\n      tag_count: 0,\n      tags: '',\n      revision_count: 0,\n      file_count: 0,\n      history_count: 0\n    };\n    \n    enrichedItems.push({ json: enrichedData });\n  } catch (error) {\n    console.error(`处理bug_id ${bugId} 时出错:`, error);\n  }\n}\n\nreturn enrichedItems;"
       },
-      "id": "87c41a59-340b-4496-be26-db4d3dfaaf26",
+      "id": "6a808de9-2111-454d-8eeb-9ac72a30de99",
       "name": "数据转换和丰富",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -97,7 +96,7 @@
       "parameters": {
         "jsCode": "// 安全转义PostgreSQL字符串的函数\nfunction pgEscape(str) {\n  if (str === null || str === undefined || str === 'null' || str === '') {\n    return 'NULL';\n  }\n  // 转义单引号为两个单引号\n  return \"'\" + String(str).replace(/'/g, \"''\") + \"'\";\n}\n\n// 处理时间戳字段\nfunction pgTimestamp(ts) {\n  if (!ts || ts === 'null' || ts === 'NULL') {\n    return 'NULL';\n  }\n  return \"'\" + String(ts).replace(/'/g, \"''\") + \"'\";\n}\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json;\n  \n  const sql = `INSERT INTO mantis.bug_analysis (\n  bug_id, bug_no_for_ui, project_name, view_state_name,\n  registered_at, last_updated_at,\n  handler_display, reporter_display,\n  status_name, priority_name, severity_name, reproducibility,\n  summary, detail_description, category_name,\n  investigator, investigated_at, fixer, fixed_at,\n  bug_category_jp, bug_classification, related_command, cause_large, cause_small,\n  root_cause_text, fix_detail_text,\n  synced_at, data_version, is_deleted\n) VALUES (\n  ${data.bug_id},\n  ${pgEscape(data.bug_no_for_ui)},\n  ${pgEscape(data.project_name)},\n  ${pgEscape(data.view_state_name)},\n  ${pgTimestamp(data.registered_at)},\n  ${pgTimestamp(data.last_updated_at)},\n  ${pgEscape(data.handler_display)},\n  ${pgEscape(data.reporter_display)},\n  ${pgEscape(data.status_name)},\n  ${pgEscape(data.priority_name)},\n  ${pgEscape(data.severity_name)},\n  ${data.reproducibility || 0},\n  ${pgEscape(data.summary)},\n  ${pgEscape(data.detail_description)},\n  ${pgEscape(data.category_name)},\n  ${pgEscape(data.investigator)},\n  ${pgTimestamp(data.investigated_at)},\n  ${pgEscape(data.fixer)},\n  ${pgTimestamp(data.fixed_at)},\n  ${pgEscape(data.bug_category_jp)},\n  ${pgEscape(data.bug_classification)},\n  ${pgEscape(data.related_command)},\n  ${pgEscape(data.cause_large)},\n  ${pgEscape(data.cause_small)},\n  ${pgEscape(data.root_cause_text)},\n  ${pgEscape(data.fix_detail_text)},\n  NOW(), 1, FALSE\n)\nON CONFLICT (bug_id) DO UPDATE SET\n  project_name = EXCLUDED.project_name,\n  view_state_name = EXCLUDED.view_state_name,\n  registered_at = EXCLUDED.registered_at,\n  last_updated_at = EXCLUDED.last_updated_at,\n  handler_display = EXCLUDED.handler_display,\n  reporter_display = EXCLUDED.reporter_display,\n  status_name = EXCLUDED.status_name,\n  priority_name = EXCLUDED.priority_name,\n  severity_name = EXCLUDED.severity_name,\n  reproducibility = EXCLUDED.reproducibility,\n  summary = EXCLUDED.summary,\n  detail_description = EXCLUDED.detail_description,\n  category_name = EXCLUDED.category_name,\n  investigator = EXCLUDED.investigator,\n  investigated_at = EXCLUDED.investigated_at,\n  fixer = EXCLUDED.fixer,\n  fixed_at = EXCLUDED.fixed_at,\n  bug_category_jp = EXCLUDED.bug_category_jp,\n  bug_classification = EXCLUDED.bug_classification,\n  related_command = EXCLUDED.related_command,\n  cause_large = EXCLUDED.cause_large,\n  cause_small = EXCLUDED.cause_small,\n  root_cause_text = EXCLUDED.root_cause_text,\n  fix_detail_text = EXCLUDED.fix_detail_text,\n  synced_at = NOW(),\n  data_version = mantis.bug_analysis.data_version + 1;`;\n  \n  results.push({ json: { sql: sql, bug_id: data.bug_id } });\n}\n\nreturn results;"
       },
-      "id": "f8a8a4ea-da36-4502-bf4e-d83c9dd45d5c",
+      "id": "b28e4527-f2f5-471c-8f8a-2d711e60679b",
       "name": "生成插入SQL",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -114,7 +113,7 @@
         "query": "={{ $json.sql }}",
         "options": {}
       },
-      "id": "exec-insert-sql-node",
+      "id": "76b38bd9-2e74-4aae-b0de-5257e2b12093",
       "name": "执行插入SQL",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -125,7 +124,7 @@
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
-          "name": "Postgres account"
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput",
@@ -135,7 +134,7 @@
       "parameters": {
         "jsCode": "// 更新同步统计\nconst syncLogId = $('创建同步日志').first().json.sync_log_id;\n// 获取本批次查询到的记录数\nconst sourceData = $('分批查询源数据').all();\nconst processedCount = sourceData.length;\nconst currentOffset = $('分批查询源数据').first().json.offset || 0;\n\nreturn [{\n  json: {\n    sync_log_id: syncLogId,\n    records_processed: processedCount,\n    next_offset: currentOffset + 1000,\n    should_continue: processedCount >= 1000\n  }\n}];"
       },
-      "id": "5d6cfc2e-67f8-42b8-b825-b707e050faea",
+      "id": "86d355a7-d844-42a4-b56a-4b1b48e5028c",
       "name": "更新处理进度",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -156,7 +155,7 @@
           ]
         }
       },
-      "id": "ea9e2656-35de-4223-b14d-d28cae5b468b",
+      "id": "ed63c806-720f-48af-ad8c-a613174ef3c7",
       "name": "判断是否继续",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
@@ -170,7 +169,7 @@
         "amount": 2,
         "unit": "seconds"
       },
-      "id": "065c0495-2ec2-4454-bffb-1bee317ba23f",
+      "id": "98f0e540-d4af-42d7-9e18-de492eba6fdf",
       "name": "等待2秒",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1,
@@ -185,7 +184,7 @@
       "parameters": {
         "jsCode": "// 准备下一批次的offset\nreturn [{\n  json: {\n    offset: $json.next_offset\n  }\n}];"
       },
-      "id": "1bb060b5-c550-4ee0-9f92-d62092aa5834",
+      "id": "ff8d5ac9-93a1-40bd-8058-1c969ffce40a",
       "name": "准备下一批",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -201,7 +200,7 @@
         "query": "UPDATE mantis.sync_log \nSET \n  sync_status = 'SUCCESS',\n  end_time = NOW(),\n  execution_time_seconds = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER,\n  last_synced_timestamp = NOW()\nWHERE id = {{ $('创建同步日志').first().json.sync_log_id }};",
         "options": {}
       },
-      "id": "929ae945-b009-4297-bc61-37dfba8c1b39",
+      "id": "075f6963-1040-406b-bb3d-59cc96caaa28",
       "name": "完成同步日志",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -212,7 +211,7 @@
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
-          "name": "Postgres account"
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput"
@@ -223,7 +222,7 @@
         "query": "UPDATE mantis.sync_config \nSET config_value = NOW()::TEXT\nWHERE config_key = 'last_sync_timestamp';",
         "options": {}
       },
-      "id": "96a7882f-4b8e-4339-9c77-50663ea3c9ea",
+      "id": "a563605a-42ca-4d64-86ef-d573727b0492",
       "name": "更新同步配置",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -234,7 +233,7 @@
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
-          "name": "Postgres account"
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput"
@@ -245,7 +244,7 @@
         "query": "SELECT \n  COUNT(*) as total_records,\n  MAX(last_updated_at) as latest_update,\n  MIN(registered_at) as earliest_create\nFROM mantis.bug_analysis;",
         "options": {}
       },
-      "id": "42a558df-f128-4cc1-8f74-05ea4621ddc6",
+      "id": "7578f9af-35c3-4627-bb57-da43754c427b",
       "name": "获取最终统计",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -256,7 +255,7 @@
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
-          "name": "Postgres account"
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput"
@@ -267,7 +266,7 @@
         "query": "UPDATE mantis.sync_log \nSET \n  sync_status = 'FAILED',\n  end_time = NOW(),\n  error_message = '{{ $json.error }}'\nWHERE id = {{ $('创建同步日志').first().json.sync_log_id }};",
         "options": {}
       },
-      "id": "b12cacea-56fd-4d52-9fe0-ef3db99550d2",
+      "id": "cce1d128-6932-4fa9-a3d0-2bd5744e7445",
       "name": "记录错误",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
@@ -278,7 +277,7 @@
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
-          "name": "Postgres account"
+          "name": "TargetDB"
         }
       }
     }
@@ -447,12 +446,11 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "f6409250-2bc9-46c0-8921-23a60419c86f",
+  "versionId": "78cf16fa-fe23-4e50-a20e-c92ca18aca5f",
   "meta": {
-    "templateCredsSetupCompleted": true,
     "instanceId": "1003d7a4418464b97d5dcd6234164bb132b89fde605b38f31cba0abf5a7b1b81"
   },
-  "id": "vc7tcOwoIhnmyONJ",
+  "id": "93e7GHXFfWC9oJTP",
   "tags": [
     {
       "name": "Mantis同步",

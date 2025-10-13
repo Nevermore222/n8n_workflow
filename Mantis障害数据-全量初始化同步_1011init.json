@@ -1,0 +1,441 @@
+{
+  "name": "Mantis障害数据-全量初始化同步",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "fe402573-def2-4d2c-81fb-07e84b440b7a",
+      "name": "手动触发",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1760,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sync_log (sync_type, sync_status, start_time) VALUES ('FULL', 'RUNNING', NOW()) RETURNING id as sync_log_id;",
+        "options": {}
+      },
+      "id": "98b76ce7-a1a5-4197-a71d-f1e19881390f",
+      "name": "创建同步日志",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1536,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n    b.id AS bug_id,\n    b.project_id,\n    b.reporter_id,\n    b.handler_id,\n    b.priority,\n    b.severity,\n    b.status,\n    b.resolution,\n    b.reproducibility,\n    b.category,\n    b.version,\n    b.fixed_in_version,\n    b.target_version,\n    b.platform,\n    b.os,\n    b.os_build,\n    b.date_submitted AS source_created_at,\n    b.last_updated AS source_updated_at,\n    bt.summary,\n    bt.description,\n    bt.steps_to_reproduce,\n    bt.additional_information\nFROM mantis_bug_table b\nLEFT JOIN mantis_bug_text_table bt ON b.bug_text_id = bt.id\nORDER BY b.id\nLIMIT 1000 OFFSET {{ $json.offset || 0 }};",
+        "options": {}
+      },
+      "id": "878a0569-06d3-42bd-8b7d-5116c2590a20",
+      "name": "分批查询源数据",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.1,
+      "position": [
+        -1328,
+        208
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "JN4ZRi7Xi3HQr9k7",
+          "name": "SourceDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "每次查询1000条记录，避免内存溢出"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.length }}",
+              "operation": "larger"
+            }
+          ]
+        }
+      },
+      "id": "139d3915-85e9-465c-9454-973e1a8905ff",
+      "name": "判断是否有数据",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 丰富数据：为每条记录添加统计信息\nconst items = $input.all();\nconst enrichedItems = [];\n\nfor (const item of items) {\n  const bugId = item.json.bug_id;\n  \n  try {\n    // 查询标签信息（需要在n8n中配置额外的查询节点，这里简化处理）\n    // 实际使用时，可以通过HTTP请求或额外的MySQL查询获取\n    \n    const enrichedData = {\n      ...item.json,\n      // 添加同步时间戳\n      synced_at: new Date().toISOString().slice(0, 19).replace('T', ' '),\n      data_version: 1,\n      is_deleted: 0,\n      // 这里可以添加更多计算字段\n      tag_count: 0,\n      tags: '',\n      revision_count: 0,\n      file_count: 0,\n      history_count: 0\n    };\n    \n    enrichedItems.push({ json: enrichedData });\n  } catch (error) {\n    console.error(`处理bug_id ${bugId} 时出错:`, error);\n  }\n}\n\nreturn enrichedItems;"
+      },
+      "id": "87c41a59-340b-4496-be26-db4d3dfaaf26",
+      "name": "数据转换和丰富",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        112
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "添加统计信息和计算字段"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": "mantis_bug_analysis",
+        "options": {}
+      },
+      "id": "f8a8a4ea-da36-4502-bf4e-d83c9dd45d5c",
+      "name": "批量插入目标表",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -656,
+        112
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "使用INSERT避免重复"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 更新同步统计\nconst syncLogId = $('创建同步日志').first().json.sync_log_id;\nconst processedCount = $input.all().length;\nconst currentOffset = $('分批查询源数据').first().json.offset || 0;\n\nreturn [{\n  json: {\n    sync_log_id: syncLogId,\n    records_processed: processedCount,\n    next_offset: currentOffset + 1000,\n    should_continue: processedCount >= 1000\n  }\n}];"
+      },
+      "id": "5d6cfc2e-67f8-42b8-b825-b707e050faea",
+      "name": "更新处理进度",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        112
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_continue }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "ea9e2656-35de-4223-b14d-d28cae5b468b",
+      "name": "判断是否继续",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "065c0495-2ec2-4454-bffb-1bee317ba23f",
+      "name": "等待2秒",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "3d78a45c-fe26-4e30-924f-48c337982495",
+      "notes": "避免数据库压力过大"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备下一批次的offset\nreturn [{\n  json: {\n    offset: $json.next_offset\n  }\n}];"
+      },
+      "id": "1bb060b5-c550-4ee0-9f92-d62092aa5834",
+      "name": "准备下一批",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sync_log \nSET \n  sync_status = 'SUCCESS',\n  end_time = NOW(),\n  execution_time_seconds = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER,\n  last_synced_timestamp = NOW()\nWHERE id = {{ $('创建同步日志').first().json.sync_log_id }};",
+        "options": {}
+      },
+      "id": "929ae945-b009-4297-bc61-37dfba8c1b39",
+      "name": "完成同步日志",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -224,
+        304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sync_config \nSET config_value = NOW()::TEXT\nWHERE config_key = 'last_sync_timestamp';",
+        "options": {}
+      },
+      "id": "96a7882f-4b8e-4339-9c77-50663ea3c9ea",
+      "name": "更新同步配置",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  COUNT(*) as total_records,\n  MAX(source_updated_at) as latest_update,\n  MIN(source_created_at) as earliest_create\nFROM mantis_bug_analysis;",
+        "options": {}
+      },
+      "id": "42a558df-f128-4cc1-8f74-05ea4621ddc6",
+      "name": "获取最终统计",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sync_log \nSET \n  sync_status = 'FAILED',\n  end_time = NOW(),\n  error_message = '{{ $json.error }}'\nWHERE id = {{ $('创建同步日志').first().json.sync_log_id }};",
+        "options": {}
+      },
+      "id": "b12cacea-56fd-4d52-9fe0-ef3db99550d2",
+      "name": "记录错误",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1104,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "手动触发": {
+      "main": [
+        [
+          {
+            "node": "创建同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "创建同步日志": {
+      "main": [
+        [
+          {
+            "node": "分批查询源数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "分批查询源数据": {
+      "main": [
+        [
+          {
+            "node": "判断是否有数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否有数据": {
+      "main": [
+        [
+          {
+            "node": "数据转换和丰富",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "完成同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "数据转换和丰富": {
+      "main": [
+        [
+          {
+            "node": "批量插入目标表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "批量插入目标表": {
+      "main": [
+        [
+          {
+            "node": "更新处理进度",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新处理进度": {
+      "main": [
+        [
+          {
+            "node": "判断是否继续",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否继续": {
+      "main": [
+        [
+          {
+            "node": "等待2秒",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "完成同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待2秒": {
+      "main": [
+        [
+          {
+            "node": "准备下一批",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备下一批": {
+      "main": [
+        [
+          {
+            "node": "分批查询源数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "完成同步日志": {
+      "main": [
+        [
+          {
+            "node": "更新同步配置",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新同步配置": {
+      "main": [
+        [
+          {
+            "node": "获取最终统计",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f6409250-2bc9-46c0-8921-23a60419c86f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1003d7a4418464b97d5dcd6234164bb132b89fde605b38f31cba0abf5a7b1b81"
+  },
+  "id": "vc7tcOwoIhnmyONJ",
+  "tags": [
+    {
+      "name": "Mantis同步",
+      "id": "LzKc1zENSTrzLIN6",
+      "createdAt": "2025-10-10T08:32:49.722Z",
+      "updatedAt": "2025-10-10T08:32:49.722Z"
+    }
+  ]
+}
