@@ -1,5 +1,5 @@
 {
-  "name": "Mantis新规障害监控-自动通知",
+  "name": "Mantis新规障害监控-自动通知_postgre",
   "nodes": [
     {
       "parameters": {
@@ -12,11 +12,14 @@
           ]
         }
       },
-      "id": "schedule-trigger-node",
+      "id": "56be149a-24b4-4efa-8763-c19fe9bc77be",
       "name": "定时触发_每30分钟",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.1,
-      "position": [-2560, 240],
+      "position": [
+        0,
+        64
+      ],
       "notes": "每30分钟自动检查一次新提出的障害"
     },
     {
@@ -25,11 +28,14 @@
         "query": "SELECT COALESCE(MAX(bug_id), 0) AS max_checked_bug_id FROM mantis.new_bug_monitor_log;",
         "options": {}
       },
-      "id": "query-max-checked-id-node",
+      "id": "5e9ccaf1-3e72-4a3b-b494-8361f82bfdda",
       "name": "查询已检查的最大BugID",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
-      "position": [-2336, 240],
+      "position": [
+        224,
+        64
+      ],
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
@@ -43,11 +49,14 @@
       "parameters": {
         "jsCode": "// 准备查询参数\nconst maxCheckedId = $('查询已检查的最大BugID').first().json.max_checked_bug_id || 0;\n\nreturn [{\n  json: {\n    max_checked_bug_id: maxCheckedId,\n    check_time: new Date().toISOString()\n  }\n}];"
       },
-      "id": "prepare-params-node",
+      "id": "66f50576-7ff9-4bfc-9052-e8e1b83d16c8",
       "name": "准备查询参数",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-2112, 240],
+      "position": [
+        448,
+        64
+      ],
       "onError": "continueErrorOutput"
     },
     {
@@ -56,11 +65,14 @@
         "query": "SELECT\n  b.id AS bug_id,\n  p.name AS project_name,\n  FROM_UNIXTIME(b.date_submitted) AS registered_at,\n  CASE b.status\n    WHEN 10 THEN 'new'\n    WHEN 20 THEN 'feedback'\n    WHEN 30 THEN 'acknowledged'\n    WHEN 40 THEN 'confirmed'\n    WHEN 50 THEN 'assigned'\n    WHEN 77 THEN '調査中'\n    WHEN 78 THEN '修正中'\n    WHEN 80 THEN 'resolved'\n    WHEN 85 THEN '確認済'\n    WHEN 90 THEN 'closed'\n    ELSE CAST(b.status AS CHAR)\n  END AS status_name,\n  b.summary,\n  bt.description AS detail_description,\n  c.name AS category_name\nFROM mantis_bug_table b\nLEFT JOIN mantis_project_table p ON p.id = b.project_id\nLEFT JOIN mantis_bug_text_table bt ON bt.id = b.bug_text_id\nLEFT JOIN mantis_category_table c ON c.id = b.category_id\nWHERE b.status = 10\n  AND b.id > {{ $json.max_checked_bug_id || 0 }}\n  AND FROM_UNIXTIME(b.date_submitted) >= '2025-10-01 00:00:00'\nORDER BY b.id\nLIMIT 50;",
         "options": {}
       },
-      "id": "query-new-bugs-node",
+      "id": "361d299e-a21b-4fcd-8e25-da08032caf4a",
       "name": "查询新规障害",
       "type": "n8n-nodes-base.mySql",
       "typeVersion": 2.1,
-      "position": [-1888, 240],
+      "position": [
+        672,
+        64
+      ],
       "credentials": {
         "mySql": {
           "id": "JN4ZRi7Xi3HQr9k7",
@@ -81,21 +93,27 @@
           ]
         }
       },
-      "id": "check-has-new-bugs-node",
+      "id": "c5159956-af4d-4eee-8035-220ef260f3a5",
       "name": "判断是否有新障害",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [-1664, 240]
+      "position": [
+        896,
+        64
+      ]
     },
     {
       "parameters": {
         "jsCode": "// 准备调用Dify的数据 - 将每条障害格式化为AI诊断请求\nconst bugs = $input.all();\n\nif (bugs.length === 0) {\n  return [];\n}\n\n// 为每条障害生成Dify请求数据\nconst difyRequests = bugs.map(item => {\n  const bug = item.json;\n  \n  // 构建诊断查询文本\n  const query = `请分析以下障害信息并提供诊断建议：\n\n障害编号：${bug.bug_id}\n项目名称：${bug.project_name || '未指定'}\n分类：${bug.category_name || '未分类'}\n概要：${bug.summary || '无'}\n\n详细描述：\n${bug.detail_description || '无详细描述'}\n\n请基于历史案例提供：\n1. 相似案例分析\n2. 根本原因分析\n3. 诊断建议和定位方向\n4. 修正方案参考`;\n\n  return {\n    json: {\n      bug_id: bug.bug_id,\n      project_name: bug.project_name,\n      category_name: bug.category_name,\n      summary: bug.summary,\n      detail_description: bug.detail_description,\n      dify_query: query,\n      request_time: new Date().toISOString()\n    }\n  };\n});\n\nreturn difyRequests;"
       },
-      "id": "prepare-dify-request-node",
+      "id": "3fbddf5b-afda-41fd-9c60-7de23354c202",
       "name": "准备Dify请求",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-1440, 128],
+      "position": [
+        1120,
+        -48
+      ],
       "onError": "continueErrorOutput",
       "notes": "为每条障害准备Dify AI诊断请求数据"
     },
@@ -103,7 +121,6 @@
       "parameters": {
         "method": "POST",
         "url": "http://192.168.8.247/v1/chat-messages",
-        "authentication": "none",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -122,11 +139,14 @@
         "jsonBody": "={\n  \"inputs\": {},\n  \"query\": {{ JSON.stringify($json.dify_query) }},\n  \"response_mode\": \"streaming\",\n  \"user\": \"n8n-workflow\",\n  \"conversation_id\": \"\"\n}",
         "options": {}
       },
-      "id": "call-dify-agent-node",
+      "id": "600fb348-42df-4b88-98e1-1ccccd424f5f",
       "name": "调用Dify智能体",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-1216, 128],
+      "position": [
+        1344,
+        -48
+      ],
       "onError": "continueErrorOutput",
       "notes": "调用Dify障害诊断Agent获取AI建议"
     },
@@ -134,43 +154,52 @@
       "parameters": {
         "jsCode": "// 处理Dify streaming返回结果\nconst items = $input.all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const originalData = $('准备Dify请求').all()[i].json;\n  \n  let aiSuggestions = '';\n  let status = 'failed';\n  let errorMessage = null;\n  \n  try {\n    const response = item.json;\n    \n    // 处理streaming格式：data字段包含SSE流\n    if (response && response.data) {\n      const streamData = response.data;\n      \n      // 解析SSE格式的数据流\n      const lines = streamData.split('\\n');\n      let fullAnswer = '';\n      \n      for (const line of lines) {\n        if (line.startsWith('data: ')) {\n          try {\n            const jsonStr = line.substring(6); // 移除 \"data: \" 前缀\n            const event = JSON.parse(jsonStr);\n            \n            // 只收集agent_message事件的answer字段（累加增量）\n            if (event.event === 'agent_message' && event.answer) {\n              fullAnswer += event.answer;\n            }\n          } catch (parseError) {\n            // 跳过无法解析的行\n            continue;\n          }\n        }\n      }\n      \n      if (fullAnswer) {\n        aiSuggestions = fullAnswer.trim();\n        status = 'success';\n      } else {\n        errorMessage = 'Dify streaming响应中未找到answer字段';\n      }\n    } else {\n      errorMessage = 'Dify返回格式异常: ' + JSON.stringify(response).substring(0, 200);\n    }\n  } catch (error) {\n    errorMessage = 'AI响应解析失败: ' + error.message;\n  }\n  \n  results.push({\n    json: {\n      bug_id: originalData.bug_id,\n      ai_suggestions: aiSuggestions,\n      status: status,\n      error_message: errorMessage,\n      request_time: originalData.request_time,\n      response_time: new Date().toISOString(),\n      project_name: originalData.project_name,\n      summary: originalData.summary\n    }\n  });\n}\n\nreturn results;"
       },
-      "id": "process-ai-response-node",
+      "id": "c7600aed-6d5e-494b-b6b7-7a93091cc0b2",
       "name": "处理AI响应",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-992, 128],
+      "position": [
+        1568,
+        -48
+      ],
       "onError": "continueErrorOutput",
       "notes": "解析Dify返回的AI诊断结果"
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO mantis_bug_ai_diagnosis (\n  bug_id,\n  ai_suggestions,\n  status,\n  error_message,\n  request_time,\n  response_time,\n  project_name,\n  bug_summary\n)\nVALUES\n{{ $input.all().map(item => {\n  const d = item.json;\n  function mysqlEscape(str) {\n    if (!str || str === 'null' || str === 'NULL') return 'NULL';\n    const s = String(str).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\");\n    return \"'\" + s + \"'\";\n  }\n  return `(\n    ${d.bug_id},\n    ${mysqlEscape(d.ai_suggestions)},\n    ${mysqlEscape(d.status)},\n    ${mysqlEscape(d.error_message)},\n    ${mysqlEscape(d.request_time)},\n    ${mysqlEscape(d.response_time)},\n    ${mysqlEscape(d.project_name)},\n    ${mysqlEscape(d.summary)}\n  )`;\n}).join(',\\n') }}\nON DUPLICATE KEY UPDATE\n  ai_suggestions = VALUES(ai_suggestions),\n  status = VALUES(status),\n  error_message = VALUES(error_message),\n  response_time = VALUES(response_time),\n  updated_at = CURRENT_TIMESTAMP;",
+        "query": "INSERT INTO mantis.bug_ai_diagnosis (\n  bug_id,\n  ai_suggestions,\n  status,\n  error_message,\n  request_time,\n  response_time,\n  project_name,\n  bug_summary\n)\nVALUES\n{{ $input.all().map(item => {\n  const d = item.json;\n  function pgEscape(str) {\n    if (!str || str === 'null' || str === 'NULL') return 'NULL';\n    let tag = 'ai';\n    const s = String(str);\n    while (s.includes(`$${tag}$`)) { tag = tag + '_'; }\n    return `$${tag}$` + s + `$${tag}$`;\n  }\n  return `(\n    ${d.bug_id},\n    ${pgEscape(d.ai_suggestions)},\n    ${pgEscape(d.status)},\n    ${pgEscape(d.error_message)},\n    ${pgEscape(d.request_time)},\n    ${pgEscape(d.response_time)},\n    ${pgEscape(d.project_name)},\n    ${pgEscape(d.summary)}\n  )`;\n}).join(',\\n') }}\nON CONFLICT (bug_id) DO UPDATE SET\n  ai_suggestions = EXCLUDED.ai_suggestions,\n  status = EXCLUDED.status,\n  error_message = EXCLUDED.error_message,\n  response_time = EXCLUDED.response_time,\n  updated_at = NOW();",
         "options": {}
       },
-      "id": "save-ai-diagnosis-node",
+      "id": "6b175db2-28a5-47e5-a05c-6cf2491ed34f",
       "name": "保存AI诊断结果",
-      "type": "n8n-nodes-base.mySql",
+      "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
-      "position": [-768, 128],
+      "position": [
+        1792,
+        -48
+      ],
       "credentials": {
-        "mySql": {
-          "id": "JN4ZRi7Xi3HQr9k7",
-          "name": "SourceDB"
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "将AI诊断结果循环批量保存到源数据库"
+      "notes": "将AI诊断结果保存到数据库"
     },
     {
       "parameters": {
         "jsCode": "// 生成通知汇总\nconst aiResults = $('处理AI响应').all();\nconst bugs = $('查询新规障害').all();\nconst checkTime = $('准备查询参数').first().json.check_time;\n\nif (bugs.length === 0) {\n  return [{ json: { message: '没有新的障害', count: 0 } }];\n}\n\nconst successCount = aiResults.filter(r => r.json.status === 'success').length;\nconst failedCount = aiResults.filter(r => r.json.status === 'failed').length;\n\nconst lines = [\n  `📢 *新规障害AI诊断通知* - ${new Date(checkTime).toLocaleString('ja-JP')}`,\n  ``,\n  `发现 *${bugs.length}* 个新障害，AI诊断完成：`,\n  `✅ 成功: ${successCount}个`,\n  `❌ 失败: ${failedCount}个`,\n  ``,\n  `---`,\n  ``\n];\n\nbugs.forEach((item, index) => {\n  const bug = item.json;\n  const aiResult = aiResults[index]?.json;\n  const registeredDate = bug.registered_at ? new Date(bug.registered_at).toLocaleString('ja-JP') : 'N/A';\n  \n  lines.push(`*${index + 1}. Bug #${bug.bug_id}* ${aiResult?.status === 'success' ? '✅' : '❌'}`);\n  lines.push(`  📋 概要: ${bug.summary || 'N/A'}`);\n  lines.push(`  📁 项目: ${bug.project_name || 'N/A'}`);\n  lines.push(`  📂 分类: ${bug.category_name || 'N/A'}`);\n  lines.push(`  🕐 登录日期: ${registeredDate}`);\n  \n  if (aiResult?.status === 'success') {\n    const suggestion = aiResult.ai_suggestions.substring(0, 150) + '...';\n    lines.push(`  🤖 AI诊断: ${suggestion}`);\n  } else if (aiResult?.error_message) {\n    lines.push(`  ⚠️ 诊断失败: ${aiResult.error_message}`);\n  }\n  \n  lines.push(``);\n});\n\nlines.push(`---`);\nlines.push(`最大BugID: ${Math.max(...bugs.map(b => b.json.bug_id))}`);\n\nconst formattedMessage = lines.join('\\n');\n\nreturn [{\n  json: {\n    message: formattedMessage,\n    count: bugs.length,\n    success_count: successCount,\n    failed_count: failedCount,\n    max_bug_id: Math.max(...bugs.map(b => b.json.bug_id)),\n    check_time: checkTime\n  }\n}];"
       },
-      "id": "format-summary-node",
+      "id": "d4b4fe87-7775-4f1f-baf4-c99d68b0a6fc",
       "name": "格式化通知汇总",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-544, 128],
+      "position": [
+        2016,
+        -48
+      ],
       "onError": "continueErrorOutput",
       "notes": "生成包含AI诊断结果的通知汇总"
     },
@@ -180,11 +209,14 @@
         "query": "INSERT INTO mantis.new_bug_monitor_log (bug_id, check_time, bug_summary, project_name, category_name, registered_at)\nVALUES \n{{ $('查询新规障害').all().map(item => \n  `(${item.json.bug_id}, NOW(), $n8n$${item.json.summary || ''}$n8n$, $n8n$${item.json.project_name || ''}$n8n$, $n8n$${item.json.category_name || ''}$n8n$, $n8n$${item.json.registered_at || ''}$n8n$)`\n).join(',\\n') }}\nON CONFLICT (bug_id) DO UPDATE SET\n  check_time = EXCLUDED.check_time;",
         "options": {}
       },
-      "id": "log-checked-bugs-node",
+      "id": "f4305866-d6c3-47d8-8246-e9aa953f3e05",
       "name": "记录已检查的障害",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
-      "position": [-1216, 128],
+      "position": [
+        1344,
+        -208
+      ],
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
@@ -200,11 +232,14 @@
         "query": "CREATE TABLE IF NOT EXISTS mantis.new_bug_monitor_log (\n  id BIGSERIAL PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  check_time TIMESTAMP NOT NULL DEFAULT NOW(),\n  bug_summary TEXT,\n  project_name VARCHAR(255),\n  category_name VARCHAR(255),\n  registered_at TIMESTAMP,\n  created_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_bug_id ON mantis.new_bug_monitor_log(bug_id);\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_check_time ON mantis.new_bug_monitor_log(check_time);\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_registered_at ON mantis.new_bug_monitor_log(registered_at);",
         "options": {}
       },
-      "id": "init-monitor-table-node",
+      "id": "b509cece-7420-49cc-9767-539334d9636a",
       "name": "初始化监控表",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
-      "position": [-2560, 128],
+      "position": [
+        16,
+        -160
+      ],
       "credentials": {
         "postgres": {
           "id": "tWcUIJhVg6bDlGDc",
@@ -217,68 +252,155 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS mantis_bug_ai_diagnosis (\n  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  ai_suggestions TEXT,\n  status VARCHAR(20) NOT NULL DEFAULT 'pending',\n  error_message TEXT,\n  request_time TIMESTAMP NOT NULL,\n  response_time TIMESTAMP NULL,\n  project_name VARCHAR(255),\n  bug_summary TEXT,\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  INDEX idx_bug_ai_diagnosis_bug_id (bug_id),\n  INDEX idx_bug_ai_diagnosis_status (status),\n  INDEX idx_bug_ai_diagnosis_created_at (created_at)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI障害诊断结果表';",
+        "query": "CREATE TABLE IF NOT EXISTS mantis.bug_ai_diagnosis (\n  id BIGSERIAL PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  ai_suggestions TEXT,\n  status VARCHAR(20) NOT NULL DEFAULT 'pending',\n  error_message TEXT,\n  request_time TIMESTAMP NOT NULL,\n  response_time TIMESTAMP,\n  project_name VARCHAR(255),\n  bug_summary TEXT,\n  created_at TIMESTAMP DEFAULT NOW(),\n  updated_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_bug_id ON mantis.bug_ai_diagnosis(bug_id);\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_status ON mantis.bug_ai_diagnosis(status);\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_created_at ON mantis.bug_ai_diagnosis(created_at);\n\nCOMMENT ON TABLE mantis.bug_ai_diagnosis IS 'AI障害诊断结果表';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.bug_id IS '障害编号';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.ai_suggestions IS 'AI诊断建议内容';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.status IS '诊断状态: success/failed/pending';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.error_message IS '失败时的错误信息';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.request_time IS '发起请求时间';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.response_time IS '收到响应时间';",
         "options": {}
       },
-      "id": "init-ai-diagnosis-table-node",
+      "id": "488fd253-bc98-4ac3-8b77-33deb9f0364f",
       "name": "初始化AI诊断表",
-      "type": "n8n-nodes-base.mySql",
+      "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
-      "position": [-2336, 128],
+      "position": [
+        240,
+        -160
+      ],
       "credentials": {
-        "mySql": {
-          "id": "JN4ZRi7Xi3HQr9k7",
-          "name": "SourceDB"
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "首次运行时在源数据库创建AI诊断结果表（仅执行一次即可）"
+      "notes": "首次运行时创建AI诊断结果表（仅执行一次即可）"
     }
   ],
+  "pinData": {},
   "connections": {
     "定时触发_每30分钟": {
-      "main": [[{ "node": "查询已检查的最大BugID", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "查询已检查的最大BugID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "查询已检查的最大BugID": {
-      "main": [[{ "node": "准备查询参数", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "准备查询参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "准备查询参数": {
-      "main": [[{ "node": "查询新规障害", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "查询新规障害",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "查询新规障害": {
-      "main": [[{ "node": "判断是否有新障害", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "判断是否有新障害",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "判断是否有新障害": {
       "main": [
-        [{ "node": "准备Dify请求", "type": "main", "index": 0 }],
-        []
+        [
+          {
+            "node": "准备Dify请求",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "准备Dify请求": {
-      "main": [[{ "node": "调用Dify智能体", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "调用Dify智能体",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "调用Dify智能体": {
-      "main": [[{ "node": "处理AI响应", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "处理AI响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "处理AI响应": {
-      "main": [[{ "node": "保存AI诊断结果", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "保存AI诊断结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "保存AI诊断结果": {
-      "main": [[{ "node": "格式化通知汇总", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "格式化通知汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "格式化通知汇总": {
-      "main": [[{ "node": "记录已检查的障害", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "记录已检查的障害",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
   "settings": {
     "executionOrder": "v1"
   },
+  "versionId": "7e507827-9821-4bc3-90ce-ffd7768f4813",
+  "meta": {
+    "instanceId": "1003d7a4418464b97d5dcd6234164bb132b89fde605b38f31cba0abf5a7b1b81"
+  },
+  "id": "pozp6BgrFGXxgi1l",
   "tags": [
     {
-      "name": "Mantis监控",
-      "id": "mantis-monitor-tag"
+      "createdAt": "2025-10-23T06:06:18.958Z",
+      "updatedAt": "2025-10-23T06:06:18.958Z",
+      "id": "n720X8gn22laKLzW",
+      "name": "Mantis监控"
     }
   ]
 }
-

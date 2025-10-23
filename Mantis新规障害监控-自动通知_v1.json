@@ -145,22 +145,22 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO mantis_bug_ai_diagnosis (\n  bug_id,\n  ai_suggestions,\n  status,\n  error_message,\n  request_time,\n  response_time,\n  project_name,\n  bug_summary\n)\nVALUES\n{{ $input.all().map(item => {\n  const d = item.json;\n  function mysqlEscape(str) {\n    if (!str || str === 'null' || str === 'NULL') return 'NULL';\n    const s = String(str).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\");\n    return \"'\" + s + \"'\";\n  }\n  return `(\n    ${d.bug_id},\n    ${mysqlEscape(d.ai_suggestions)},\n    ${mysqlEscape(d.status)},\n    ${mysqlEscape(d.error_message)},\n    ${mysqlEscape(d.request_time)},\n    ${mysqlEscape(d.response_time)},\n    ${mysqlEscape(d.project_name)},\n    ${mysqlEscape(d.summary)}\n  )`;\n}).join(',\\n') }}\nON DUPLICATE KEY UPDATE\n  ai_suggestions = VALUES(ai_suggestions),\n  status = VALUES(status),\n  error_message = VALUES(error_message),\n  response_time = VALUES(response_time),\n  updated_at = CURRENT_TIMESTAMP;",
+        "query": "INSERT INTO mantis.bug_ai_diagnosis (\n  bug_id,\n  ai_suggestions,\n  status,\n  error_message,\n  request_time,\n  response_time,\n  project_name,\n  bug_summary\n)\nVALUES\n{{ $input.all().map(item => {\n  const d = item.json;\n  function pgEscape(str) {\n    if (!str || str === 'null' || str === 'NULL') return 'NULL';\n    let tag = 'ai';\n    const s = String(str);\n    while (s.includes(`$${tag}$`)) { tag = tag + '_'; }\n    return `$${tag}$` + s + `$${tag}$`;\n  }\n  return `(\n    ${d.bug_id},\n    ${pgEscape(d.ai_suggestions)},\n    ${pgEscape(d.status)},\n    ${pgEscape(d.error_message)},\n    ${pgEscape(d.request_time)},\n    ${pgEscape(d.response_time)},\n    ${pgEscape(d.project_name)},\n    ${pgEscape(d.summary)}\n  )`;\n}).join(',\\n') }}\nON CONFLICT (bug_id) DO UPDATE SET\n  ai_suggestions = EXCLUDED.ai_suggestions,\n  status = EXCLUDED.status,\n  error_message = EXCLUDED.error_message,\n  response_time = EXCLUDED.response_time,\n  updated_at = NOW();",
         "options": {}
       },
       "id": "save-ai-diagnosis-node",
       "name": "保存AI诊断结果",
-      "type": "n8n-nodes-base.mySql",
+      "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
       "position": [-768, 128],
       "credentials": {
-        "mySql": {
-          "id": "JN4ZRi7Xi3HQr9k7",
-          "name": "SourceDB"
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "将AI诊断结果循环批量保存到源数据库"
+      "notes": "将AI诊断结果保存到数据库"
     },
     {
       "parameters": {
@@ -217,22 +217,22 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS mantis_bug_ai_diagnosis (\n  id BIGINT AUTO_INCREMENT PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  ai_suggestions TEXT,\n  status VARCHAR(20) NOT NULL DEFAULT 'pending',\n  error_message TEXT,\n  request_time TIMESTAMP NOT NULL,\n  response_time TIMESTAMP NULL,\n  project_name VARCHAR(255),\n  bug_summary TEXT,\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n  INDEX idx_bug_ai_diagnosis_bug_id (bug_id),\n  INDEX idx_bug_ai_diagnosis_status (status),\n  INDEX idx_bug_ai_diagnosis_created_at (created_at)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI障害诊断结果表';",
+        "query": "CREATE TABLE IF NOT EXISTS mantis.bug_ai_diagnosis (\n  id BIGSERIAL PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  ai_suggestions TEXT,\n  status VARCHAR(20) NOT NULL DEFAULT 'pending',\n  error_message TEXT,\n  request_time TIMESTAMP NOT NULL,\n  response_time TIMESTAMP,\n  project_name VARCHAR(255),\n  bug_summary TEXT,\n  created_at TIMESTAMP DEFAULT NOW(),\n  updated_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_bug_id ON mantis.bug_ai_diagnosis(bug_id);\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_status ON mantis.bug_ai_diagnosis(status);\nCREATE INDEX IF NOT EXISTS idx_bug_ai_diagnosis_created_at ON mantis.bug_ai_diagnosis(created_at);\n\nCOMMENT ON TABLE mantis.bug_ai_diagnosis IS 'AI障害诊断结果表';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.bug_id IS '障害编号';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.ai_suggestions IS 'AI诊断建议内容';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.status IS '诊断状态: success/failed/pending';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.error_message IS '失败时的错误信息';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.request_time IS '发起请求时间';\nCOMMENT ON COLUMN mantis.bug_ai_diagnosis.response_time IS '收到响应时间';",
         "options": {}
       },
       "id": "init-ai-diagnosis-table-node",
       "name": "初始化AI诊断表",
-      "type": "n8n-nodes-base.mySql",
+      "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.1,
       "position": [-2336, 128],
       "credentials": {
-        "mySql": {
-          "id": "JN4ZRi7Xi3HQr9k7",
-          "name": "SourceDB"
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "首次运行时在源数据库创建AI诊断结果表（仅执行一次即可）"
+      "notes": "首次运行时创建AI诊断结果表（仅执行一次即可）"
     }
   ],
   "connections": {
