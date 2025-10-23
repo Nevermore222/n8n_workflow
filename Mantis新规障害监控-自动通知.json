@@ -1,0 +1,177 @@
+{
+  "name": "Mantis新规障害监控-自动通知",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger-node",
+      "name": "定时触发_每30分钟",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [-2560, 240],
+      "notes": "每30分钟自动检查一次新提出的障害"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(MAX(bug_id), 0) AS max_checked_bug_id FROM mantis.new_bug_monitor_log;",
+        "options": {}
+      },
+      "id": "query-max-checked-id-node",
+      "name": "查询已检查的最大BugID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [-2336, 240],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "从监控日志表获取上次检查到的最大bug_id"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备查询参数\nconst maxCheckedId = $('查询已检查的最大BugID').first().json.max_checked_bug_id || 0;\n\nreturn [{\n  json: {\n    max_checked_bug_id: maxCheckedId,\n    check_time: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "prepare-params-node",
+      "name": "准备查询参数",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-2112, 240],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  b.id AS bug_id,\n  p.name AS project_name,\n  FROM_UNIXTIME(b.date_submitted) AS registered_at,\n  CASE b.status\n    WHEN 10 THEN 'new'\n    WHEN 20 THEN 'feedback'\n    WHEN 30 THEN 'acknowledged'\n    WHEN 40 THEN 'confirmed'\n    WHEN 50 THEN 'assigned'\n    WHEN 77 THEN '調査中'\n    WHEN 78 THEN '修正中'\n    WHEN 80 THEN 'resolved'\n    WHEN 85 THEN '確認済'\n    WHEN 90 THEN 'closed'\n    ELSE CAST(b.status AS CHAR)\n  END AS status_name,\n  b.summary,\n  bt.description AS detail_description,\n  c.name AS category_name\nFROM mantis_bug_table b\nLEFT JOIN mantis_project_table p ON p.id = b.project_id\nLEFT JOIN mantis_bug_text_table bt ON bt.id = b.bug_text_id\nLEFT JOIN mantis_category_table c ON c.id = b.category_id\nWHERE b.status = 10\n  AND b.id > {{ $json.max_checked_bug_id || 0 }}\n  AND FROM_UNIXTIME(b.date_submitted) >= '2025-10-01 00:00:00'\nORDER BY b.id\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "query-new-bugs-node",
+      "name": "查询新规障害",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.1,
+      "position": [-1888, 240],
+      "credentials": {
+        "mySql": {
+          "id": "JN4ZRi7Xi3HQr9k7",
+          "name": "SourceDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "查询status=10的新障害(2025年10月后)，每次最多50条"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $items(\"查询新规障害\").length }}",
+              "operation": "larger"
+            }
+          ]
+        }
+      },
+      "id": "check-has-new-bugs-node",
+      "name": "判断是否有新障害",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-1664, 240]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 格式化新障害数据为可读文本\nconst bugs = $input.all();\nconst checkTime = $('准备查询参数').first().json.check_time;\n\nif (bugs.length === 0) {\n  return [{ json: { message: '没有新的障害', count: 0 } }];\n}\n\n// 生成汇总文本\nconst lines = [\n  `📢 *新规障害通知* - ${new Date(checkTime).toLocaleString('ja-JP')}`,\n  ``,\n  `发现 *${bugs.length}* 个新提出的障害 (status=10, 2025年10月后)`,\n  ``,\n  `---`,\n  ``\n];\n\n// 逐条列出障害信息\nbugs.forEach((item, index) => {\n  const bug = item.json;\n  const registeredDate = bug.registered_at ? new Date(bug.registered_at).toLocaleString('ja-JP') : 'N/A';\n  \n  lines.push(`*${index + 1}. Bug #${bug.bug_id}*`);\n  lines.push(`  📋 概要: ${bug.summary || 'N/A'}`);\n  lines.push(`  📁 项目: ${bug.project_name || 'N/A'}`);\n  lines.push(`  📂 分类: ${bug.category_name || 'N/A'}`);\n  lines.push(`  🕐 登录日期: ${registeredDate}`);\n  lines.push(`  📝 状态: ${bug.status_name || 'N/A'}`);\n  \n  if (bug.detail_description) {\n    const desc = bug.detail_description.length > 100 \n      ? bug.detail_description.substring(0, 100) + '...' \n      : bug.detail_description;\n    lines.push(`  📄 详细: ${desc}`);\n  }\n  \n  lines.push(``);\n});\n\nlines.push(`---`);\nlines.push(`最大BugID: ${Math.max(...bugs.map(b => b.json.bug_id))}`);\n\nconst formattedMessage = lines.join('\\n');\n\n// 返回格式化后的消息和详细数据\nreturn [{\n  json: {\n    message: formattedMessage,\n    count: bugs.length,\n    max_bug_id: Math.max(...bugs.map(b => b.json.bug_id)),\n    bugs: bugs.map(b => b.json),\n    check_time: checkTime\n  }\n}];"
+      },
+      "id": "format-message-node",
+      "name": "格式化通知消息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1440, 128],
+      "onError": "continueErrorOutput",
+      "notes": "将新障害数据格式化为Markdown格式的通知消息"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO mantis.new_bug_monitor_log (bug_id, check_time, bug_summary, project_name, category_name, registered_at)\nVALUES \n{{ $('查询新规障害').all().map(item => \n  `(${item.json.bug_id}, NOW(), $n8n$${item.json.summary || ''}$n8n$, $n8n$${item.json.project_name || ''}$n8n$, $n8n$${item.json.category_name || ''}$n8n$, $n8n$${item.json.registered_at || ''}$n8n$)`\n).join(',\\n') }}\nON CONFLICT (bug_id) DO UPDATE SET\n  check_time = EXCLUDED.check_time;",
+        "options": {}
+      },
+      "id": "log-checked-bugs-node",
+      "name": "记录已检查的障害",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [-1216, 128],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "将检查过的障害记录到日志表，避免重复通知"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS mantis.new_bug_monitor_log (\n  id BIGSERIAL PRIMARY KEY,\n  bug_id INTEGER NOT NULL UNIQUE,\n  check_time TIMESTAMP NOT NULL DEFAULT NOW(),\n  bug_summary TEXT,\n  project_name VARCHAR(255),\n  category_name VARCHAR(255),\n  registered_at TIMESTAMP,\n  created_at TIMESTAMP DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_bug_id ON mantis.new_bug_monitor_log(bug_id);\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_check_time ON mantis.new_bug_monitor_log(check_time);\nCREATE INDEX IF NOT EXISTS idx_new_bug_monitor_registered_at ON mantis.new_bug_monitor_log(registered_at);",
+        "options": {}
+      },
+      "id": "init-monitor-table-node",
+      "name": "初始化监控表",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [-2560, 128],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "首次运行时创建监控日志表（仅执行一次即可）"
+    }
+  ],
+  "connections": {
+    "定时触发_每30分钟": {
+      "main": [[{ "node": "查询已检查的最大BugID", "type": "main", "index": 0 }]]
+    },
+    "查询已检查的最大BugID": {
+      "main": [[{ "node": "准备查询参数", "type": "main", "index": 0 }]]
+    },
+    "准备查询参数": {
+      "main": [[{ "node": "查询新规障害", "type": "main", "index": 0 }]]
+    },
+    "查询新规障害": {
+      "main": [[{ "node": "判断是否有新障害", "type": "main", "index": 0 }]]
+    },
+    "判断是否有新障害": {
+      "main": [
+        [{ "node": "格式化通知消息", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "格式化通知消息": {
+      "main": [[{ "node": "记录已检查的障害", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "Mantis监控",
+      "id": "mantis-monitor-tag"
+    }
+  ]
+}
+
