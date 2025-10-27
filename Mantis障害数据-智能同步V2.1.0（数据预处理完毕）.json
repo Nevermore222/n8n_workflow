@@ -1,0 +1,957 @@
+{
+  "name": "Mantis障害数据-智能同步V2.1.0（数据预处理完毕）",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(MAX(last_synced_bug_id), 0) AS max_synced_bug_id FROM mantis.sync_log WHERE sync_status = 'SUCCESS' AND sync_type = 'INCREMENTAL';",
+        "options": {}
+      },
+      "id": "a1c06237-518d-450a-94b6-9d2b310524af",
+      "name": "查询已同步的最大BugID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -2640,
+        672
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "从sync_log表获取上次成功同步的最大bug_id，避免数据遗漏"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO mantis.sync_log (sync_type, sync_status, start_time) VALUES ('INCREMENTAL', 'RUNNING', NOW()) RETURNING id as sync_log_id;",
+        "options": {}
+      },
+      "id": "6c69781f-0114-4215-a0f2-9731d2e8175a",
+      "name": "创建同步日志",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -2464,
+        656
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备查询参数：从最大bug_id+1开始同步\nconst maxBugId = $('查询已同步的最大BugID').first().json.max_synced_bug_id || 0;\nconst syncLogId = $('创建同步日志').first().json.sync_log_id;\n\nreturn [{\n  json: {\n    max_synced_bug_id: maxBugId,\n    sync_log_id: syncLogId,\n    offset: 0\n  }\n}];"
+      },
+      "id": "7c31a745-5204-4f79-a564-23e3ef080db2",
+      "name": "准备查询参数",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2288,
+        640
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "从最大bug_id开始查询，只同步新增数据"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH target_bugs AS (\n  SELECT id, {{ $json.offset || 0 }} AS query_offset\n  FROM mantis_bug_table\n  WHERE status = 85\n    AND id > {{ $json.max_synced_bug_id || 0 }}\n  ORDER BY id\n  LIMIT 500 OFFSET {{ $json.offset || 0 }}\n),\nlatest_history AS (\n  SELECT\n    bug_id,\n    field_name,\n    new_value,\n    ROW_NUMBER() OVER (PARTITION BY bug_id, field_name ORDER BY date_modified DESC, id DESC) AS rn\n  FROM mantis_bug_history_table\n  WHERE bug_id IN (SELECT id FROM target_bugs)\n    AND field_name IN (\n      '確認者(テスト)', '確認日(テスト)',\n      '調査者', '調査日',\n      '修正者', '修正日',\n      'バグ分類', 'バグ区分', '関連コマンド',\n      '原因区分(大)', '原因区分(小)',\n      '障害発生原因', '修正内容'\n    )\n),\nhistory_pivot AS (\n  SELECT\n    bug_id,\n    MAX(CASE WHEN field_name = '確認者(テスト)' THEN new_value END) AS test_confirmer_name,\n    MAX(CASE WHEN field_name = '確認日(テスト)' THEN new_value END) AS test_confirmed_ts,\n    MAX(CASE WHEN field_name = '調査者' THEN new_value END) AS investigator,\n    MAX(CASE WHEN field_name = '調査日' THEN new_value END) AS investigated_ts,\n    MAX(CASE WHEN field_name = '修正者' THEN new_value END) AS fixer,\n    MAX(CASE WHEN field_name = '修正日' THEN new_value END) AS fixed_ts,\n    MAX(CASE WHEN field_name = 'バグ分類' THEN new_value END) AS bug_category_jp,\n    MAX(CASE WHEN field_name = 'バグ区分' THEN new_value END) AS bug_classification,\n    MAX(CASE WHEN field_name = '関連コマンド' THEN new_value END) AS related_command,\n    MAX(CASE WHEN field_name = '原因区分(大)' THEN new_value END) AS cause_large,\n    MAX(CASE WHEN field_name = '原因区分(小)' THEN new_value END) AS cause_small,\n    MAX(CASE WHEN field_name = '障害発生原因' THEN new_value END) AS root_cause_text,\n    MAX(CASE WHEN field_name = '修正内容' THEN new_value END) AS fix_detail_text\n  FROM latest_history\n  WHERE rn = 1\n  GROUP BY bug_id\n)\nSELECT\n  b.id AS bug_id,\n  LPAD(CAST(b.id AS CHAR), 7, '0') AS bug_no_for_ui,\n  p.name AS project_name,\n  CASE b.view_state\n    WHEN 10 THEN '公開'\n    WHEN 50 THEN '非公開'\n    ELSE CONCAT('view_state_', b.view_state)\n  END AS view_state_name,\n  FROM_UNIXTIME(b.date_submitted) AS registered_at,\n  FROM_UNIXTIME(b.last_updated) AS last_updated_at,\n  CONCAT_WS('_', hu.username, hu.realname) AS handler_display,\n  CONCAT_WS('_', ru.username, ru.realname) AS reporter_display,\n  CASE b.status\n    WHEN 10 THEN 'new' WHEN 20 THEN 'feedback' WHEN 30 THEN 'acknowledged' WHEN 40 THEN 'confirmed'\n    WHEN 50 THEN 'assigned' WHEN 77 THEN '調査中' WHEN 78 THEN '修正中' WHEN 80 THEN 'resolved'\n    WHEN 85 THEN '確認済' WHEN 90 THEN 'closed' ELSE CAST(b.status AS CHAR)\n  END AS status_name,\n  CASE b.priority\n    WHEN 10 THEN 'none' WHEN 20 THEN 'low' WHEN 30 THEN 'normal' WHEN 40 THEN 'high'\n    WHEN 50 THEN 'urgent' WHEN 60 THEN 'immediate' ELSE CAST(b.priority AS CHAR)\n  END AS priority_name,\n  CASE b.severity\n    WHEN 10 THEN 'feature' WHEN 20 THEN 'trivial' WHEN 30 THEN 'text' WHEN 40 THEN 'tweak'\n    WHEN 50 THEN 'minor' WHEN 60 THEN 'major' WHEN 70 THEN 'crash' WHEN 80 THEN 'block'\n    ELSE CAST(b.severity AS CHAR)\n  END AS severity_name,\n  b.reproducibility,\n  b.summary,\n  bt.description AS detail_description,\n  c.name AS category_name,\n  hp.investigator,\n  FROM_UNIXTIME(CAST(hp.investigated_ts AS UNSIGNED)) AS investigated_at,\n  hp.fixer,\n  FROM_UNIXTIME(CAST(hp.fixed_ts AS UNSIGNED)) AS fixed_at,\n  NULLIF(TRIM(hp.bug_category_jp), '') AS bug_category_jp,\n  NULLIF(TRIM(hp.bug_classification), '') AS bug_classification,\n  NULLIF(TRIM(hp.related_command), '') AS related_command,\n  NULLIF(TRIM(hp.cause_large), '') AS cause_large,\n  NULLIF(TRIM(hp.cause_small), '') AS cause_small,\n  hp.root_cause_text,\n  hp.fix_detail_text,\n  tb.query_offset AS current_offset\nFROM target_bugs tb\nJOIN mantis_bug_table b ON b.id = tb.id\nLEFT JOIN mantis_project_table p ON p.id = b.project_id\nLEFT JOIN mantis_user_table hu ON hu.id = b.handler_id\nLEFT JOIN mantis_user_table ru ON ru.id = b.reporter_id\nLEFT JOIN mantis_bug_text_table bt ON bt.id = b.bug_text_id\nLEFT JOIN mantis_category_table c ON c.id = b.category_id\nLEFT JOIN history_pivot hp ON hp.bug_id = b.id\nORDER BY b.id;",
+        "options": {}
+      },
+      "id": "b1bc7a26-a4d2-4334-8495-d97ecc266345",
+      "name": "查询待同步数据",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.1,
+      "position": [
+        -2080,
+        624
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "JN4ZRi7Xi3HQr9k7",
+          "name": "SourceDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "每批查询500条，后续逐条插入避免参数限制"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $items(\"查询待同步数据\").length }}",
+              "operation": "larger"
+            }
+          ]
+        }
+      },
+      "id": "021a84a1-4d73-4cd1-b02a-518b854eaefc",
+      "name": "判断是否有数据",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1856,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $items('查询待同步数据').length > 0 ? 'SELECT bug_id FROM mantis.bug_analysis WHERE bug_id = ANY(ARRAY[' + $items('查询待同步数据').map(item => item.json.bug_id).join(',') + ']::INTEGER[]);' : 'SELECT 0 AS bug_id WHERE FALSE;' }}",
+        "options": {}
+      },
+      "id": "9fd8726d-4263-4694-b08f-0f2a923d3919",
+      "name": "查询已存在的BugID列表",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1600,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "查询目标表中已存在的bug_id，用于过滤"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 过滤掉已存在的bug_id，只保留新数据\nconst sourceItems = $items(\"查询待同步数据\");\nconst existingBugIds = new Set(\n  $items(\"查询已存在的BugID列表\").map(item => item.json.bug_id)\n);\n\n// 过滤出不存在的bug_id\nconst newItems = sourceItems.filter(item => {\n  const bugId = item.json.bug_id;\n  return !existingBugIds.has(bugId);\n});\n\nconst newCount = newItems.length;\nconst totalCount = sourceItems.length;\nconst skippedCount = totalCount - newCount;\n\nconsole.log(`总数据: ${totalCount}, 已存在(跳过): ${skippedCount}, 新数据: ${newCount}`);\n\n// 始终返回数据，但标记是否有新数据\nif (newCount === 0) {\n  // 没有新数据时，返回一个标记对象用于继续流程\n  return [{\n    json: {\n      has_new_data: false,\n      skipped_count: skippedCount,\n      message: '所有数据已存在，跳过插入'\n    }\n  }];\n}\n\n// 有新数据时，为每个item添加标记\nreturn newItems.map(item => ({\n  json: {\n    ...item.json,\n    has_new_data: true\n  }\n}));"
+      },
+      "id": "c533e947-0cfe-44d7-bbd7-f8666a6f45e7",
+      "name": "过滤新数据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1360,
+        464
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "过滤掉已存在的bug_id，只插入新数据，避免唯一键冲突"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_new_data }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "4ccd5b21-ada5-40eb-b4ce-65735a9aeec0",
+      "name": "判断是否有新数据要插入",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        384
+      ],
+      "notes": "如果没有新数据，跳过插入，直接判断是否继续下一批"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "mantis",
+          "mode": "list",
+          "cachedResultName": "mantis"
+        },
+        "table": {
+          "__rl": true,
+          "value": "bug_analysis",
+          "mode": "list",
+          "cachedResultName": "bug_analysis"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "bug_id": "={{ $json.bug_id }}",
+            "bug_no_for_ui": "={{ $json.bug_no_for_ui }}",
+            "project_name": "={{ $json.project_name }}",
+            "view_state_name": "={{ $json.view_state_name }}",
+            "registered_at": "={{ $json.registered_at }}",
+            "last_updated_at": "={{ $json.last_updated_at }}",
+            "handler_display": "={{ $json.handler_display }}",
+            "reporter_display": "={{ $json.reporter_display }}",
+            "status_name": "={{ $json.status_name }}",
+            "priority_name": "={{ $json.priority_name }}",
+            "severity_name": "={{ $json.severity_name }}",
+            "reproducibility": "={{ $json.reproducibility }}",
+            "summary": "={{ $json.summary }}",
+            "detail_description": "={{ $json.detail_description }}",
+            "category_name": "={{ $json.category_name }}",
+            "investigator": "={{ $json.investigator }}",
+            "investigated_at": "={{ $json.investigated_at }}",
+            "fixer": "={{ $json.fixer }}",
+            "fixed_at": "={{ $json.fixed_at }}",
+            "bug_category_jp": "={{ $json.bug_category_jp }}",
+            "bug_classification": "={{ $json.bug_classification }}",
+            "related_command": "={{ $json.related_command }}",
+            "cause_large": "={{ $json.cause_large }}",
+            "cause_small": "={{ $json.cause_small }}",
+            "root_cause_text": "={{ $json.root_cause_text }}",
+            "fix_detail_text": "={{ $json.fix_detail_text }}"
+          },
+          "matchingColumns": [
+            "bug_id"
+          ],
+          "schema": []
+        },
+        "options": {
+          "queryBatching": "transaction"
+        }
+      },
+      "id": "280f050f-d0c6-417c-86eb-7404c408b15b",
+      "name": "逐条插入PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        -896,
+        352
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "使用原生INSERT节点逐条插入，通过matchingColumns=['bug_id']实现UPSERT，避免主键冲突"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备JSON数据用于知识库预处理\nconst insertedItems = $('逐条插入PostgreSQL').all();\nconst timestamp = new Date().toISOString().slice(0,10).replace(/-/g,'');\n\n// 将插入的数据转换为export_from_db.py格式的JSON\nconst bugs = insertedItems.map(item => ({\n  bug_id: item.json.bug_id,\n  bug_no_for_ui: item.json.bug_no_for_ui,\n  project_name: item.json.project_name || '未知项目',\n  category_name: item.json.category_name || '未分类',\n  summary: item.json.summary || '',\n  detail_description: item.json.detail_description || '',\n  status_name: item.json.status_name,\n  priority_name: item.json.priority_name,\n  severity_name: item.json.severity_name,\n  bug_classification: item.json.bug_classification,\n  cause_large: item.json.cause_large,\n  cause_small: item.json.cause_small,\n  root_cause_text: item.json.root_cause_text,\n  fix_detail_text: item.json.fix_detail_text,\n  handler_display: item.json.handler_display,\n  fixer: item.json.fixer,\n  investigator: item.json.investigator,\n  registered_at: item.json.registered_at,\n  last_updated_at: item.json.last_updated_at,\n  reproducibility: item.json.reproducibility || 0\n}));\n\nconsole.log(`准备处理${bugs.length}条新数据生成知识库文档`);\n\nreturn [{\n  json: {\n    timestamp: timestamp,\n    bug_count: bugs.length,\n    bug_analysis: bugs,\n    should_process_knowledge: bugs.length > 0\n  }\n}];"
+      },
+      "id": "da25b514-afab-43fa-bf2e-fba0ff6437b7",
+      "name": "准备知识库数据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        160
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "将新插入的数据转换为知识库处理所需的JSON格式"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_process_knowledge }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "2becdc70-dae9-4092-b62a-7d2f230c2abc",
+      "name": "判断是否需要处理知识库",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        160
+      ],
+      "notes": "只有当有新数据时才处理知识库"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备文件路径和JSON数据\nconst timestamp = $json.timestamp;\nconst inputFile = `/tmp/n8n_bug_export_${timestamp}.json`;\nconst outputFile = `/tmp/processed_bugs_${timestamp}.json`;\nconst mdOutputDir = `/home/node/.n8n/knowledge_base/batch_${timestamp}`;\n\n// 将JSON数据转换为二进制数据供Write Binary File节点使用\nconst data = { bug_analysis: $json.bug_analysis };\nconst jsonString = JSON.stringify(data, null, 2);\n\nreturn [{\n  json: {\n    timestamp: timestamp,\n    bug_count: $json.bug_count,\n    bug_analysis: $json.bug_analysis,  // 传递bug_analysis到后续节点\n    input_file: inputFile,\n    output_file: outputFile,\n    md_output_dir: mdOutputDir\n  },\n  binary: {\n    data: {\n      data: Buffer.from(jsonString, 'utf-8').toString('base64'),\n      mimeType: 'application/json',\n      fileName: `bugs_export_${timestamp}.json`\n    }\n  }\n}];"
+      },
+      "id": "9e9457d9-7674-4842-afe8-3d5c5039e126",
+      "name": "准备文件数据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "准备JSON数据用于写入文件"
+    },
+    {
+      "parameters": {
+        "fileName": "={{ $json.input_file }}",
+        "options": {}
+      },
+      "id": "614e52e5-ebbd-4310-be28-2efe066eebcc",
+      "name": "写入JSON文件",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "将JSON数据写入临时文件"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 内联实现process_bugs_for_vectorization.py的功能\n// 为每个bug生成summary/detail/solution三种文档\n\n// 从上一个节点获取数据\nconst inputData = $input.first().json;\nconst bugs = inputData.bug_analysis || [];\nconst timestamp = inputData.timestamp;\n\nif (!bugs || bugs.length === 0) {\n  console.log('警告: 没有bug数据需要处理');\n  return [{\n    json: {\n      timestamp: timestamp,\n      documents: [],\n      stats: {\n        total: 0,\n        processed: 0,\n        summary_docs: 0,\n        detail_docs: 0,\n        solution_docs: 0,\n        total_docs: 0\n      },\n      md_output_dir: `/home/node/.n8n/knowledge_base/batch_${timestamp}`\n    }\n  }];\n}\n\nconst documents = [];\n\nlet stats = {\n  total: bugs.length,\n  processed: 0,\n  summary_docs: 0,\n  detail_docs: 0,\n  solution_docs: 0\n};\n\n// 清洗文本函数\nfunction cleanText(text) {\n  if (!text || text.trim() === '') return '';\n  text = text.replace(/\\\\r\\\\n/g, '\\n').replace(/\\\\n/g, '\\n').replace(/\\r\\n/g, '\\n');\n  text = text.replace(/\\n\\s*\\n/g, '\\n\\n');\n  text = text.replace(/ +/g, ' ');\n  return text.trim();\n}\n\n// 提取关键词\nfunction extractKeywords(text, maxKeywords = 5) {\n  const patterns = [\n    /ResultSet|SQLException|NullPointerException|Exception/gi,\n    /COBOL|Java|RPG|CL|CLP|DSPF/gi,\n    /batch|バッチ|画面|UI|SubFile/gi,\n    /SELECT|INSERT|UPDATE|DELETE|TABLE/gi,\n    /\\w+Service|\\w+Dao|\\w+Controller/gi\n  ];\n  \n  const keywords = new Set();\n  patterns.forEach(pattern => {\n    const matches = text.match(pattern) || [];\n    matches.forEach(m => keywords.add(m));\n  });\n  \n  return Array.from(keywords).slice(0, maxKeywords);\n}\n\n// 处理每个bug\nbugs.forEach(bug => {\n  const bug_no = bug.bug_no_for_ui || 'UNKNOWN';\n  const summary = cleanText(bug.summary || '');\n  \n  // 跳过无效数据\n  if (!summary || summary.length < 10) return;\n  if (!['確認済', 'closed', 'resolved'].includes(bug.status_name)) return;\n  \n  stats.processed++;\n  \n  // 1. 生成Summary文档\n  const keywords = extractKeywords(summary);\n  const summaryContent = `# 障害 ${bug_no}\\n\\n**项目**: ${bug.project_name || '未知项目'}  \\n**分类**: ${bug.category_name || '未分类'}  \\n**状态**: ${bug.status_name || '未知'}  \\n**优先级**: ${bug.priority_name || 'normal'}  \\n**严重程度**: ${bug.severity_name || 'trivial'}\\n\\n## 问题摘要\\n${summary}\\n\\n**关键词**: ${keywords.join(', ') || '无'}\\n`;\n  \n  documents.push({\n    doc_id: `bug_${bug_no}_summary`,\n    title: `障害${bug_no}-概要`,\n    content: summaryContent,\n    metadata: {\n      doc_type: 'summary',\n      bug_id: bug.bug_id,\n      bug_no: bug_no,\n      project: bug.project_name,\n      category: bug.category_name\n    }\n  });\n  stats.summary_docs++;\n  \n  // 2. 生成Detail文档(如果有详细描述)\n  const detail = cleanText(bug.detail_description || '');\n  if (detail && detail.length >= 20) {\n    const detailContent = `# 障害详情 ${bug_no}\\n\\n## 问题描述\\n${detail.substring(0, 1000)}${detail.length > 1000 ? '...' : ''}\\n\\n## 障害分类\\n- 障害区分: ${bug.bug_classification || '未分类'}\\n- 原因大分类: ${bug.cause_large || '未知'}\\n- 原因小分类: ${bug.cause_small || '未知'}\\n\\n## 重现性\\n复现率: ${(bug.reproducibility || 0) * 10}%\\n`;\n    \n    documents.push({\n      doc_id: `bug_${bug_no}_detail`,\n      title: `障害${bug_no}-详情`,\n      content: detailContent,\n      metadata: {\n        doc_type: 'detail',\n        bug_id: bug.bug_id,\n        bug_no: bug_no\n      }\n    });\n    stats.detail_docs++;\n  }\n  \n  // 3. 生成Solution文档(如果有解决方案)\n  const rootCause = cleanText(bug.root_cause_text || '');\n  const fixDetail = cleanText(bug.fix_detail_text || '');\n  \n  if ((rootCause && rootCause.length >= 20) || (fixDetail && fixDetail.length >= 20)) {\n    let solutionContent = `# 障害解决方案 ${bug_no}\\n`;\n    \n    if (rootCause) {\n      solutionContent += `\\n## 根本原因\\n${rootCause}\\n`;\n    }\n    \n    if (fixDetail) {\n      solutionContent += `\\n## 修正内容\\n${fixDetail}\\n`;\n    }\n    \n    solutionContent += `\\n## 处理信息\\n- 调查人: ${bug.investigator || '未知'}\\n- 修正人: ${bug.fixer || bug.handler_display || '未知'}\\n`;\n    \n    documents.push({\n      doc_id: `bug_${bug_no}_solution`,\n      title: `障害${bug_no}-方案`,\n      content: solutionContent,\n      metadata: {\n        doc_type: 'solution',\n        bug_id: bug.bug_id,\n        bug_no: bug_no\n      }\n    });\n    stats.solution_docs++;\n  }\n});\n\nstats.total_docs = documents.length;\n\nconsole.log('📊 处理统计:');\nconsole.log(`总障害数: ${stats.total}`);\nconsole.log(`已处理: ${stats.processed}`);\nconsole.log(`概要文档: ${stats.summary_docs}`);\nconsole.log(`详情文档: ${stats.detail_docs}`);\nconsole.log(`方案文档: ${stats.solution_docs}`);\nconsole.log(`总文档数: ${stats.total_docs}`);\n\nreturn [{\n  json: {\n    timestamp: timestamp,\n    documents: documents,\n    stats: stats,\n    md_output_dir: `/tmp/n8n_md_knowledge_base/batch_${timestamp}`\n  }\n}];"
+      },
+      "id": "c19d2381-9e92-4cbe-a692-4c4ab2c74d0e",
+      "name": "执行-处理向量化",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "内联实现向量化处理,生成summary/detail/solution文档"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备批次目录结构\nconst documents = $json.documents;\nconst timestamp = $json.timestamp;\nconst mdOutputDir = $json.md_output_dir;\nconst batchSize = 1000;\n\nconst totalBatches = Math.ceil(documents.length / batchSize);\nconst batchDirs = [];\n\nfor (let i = 0; i < totalBatches; i++) {\n  batchDirs.push(`${mdOutputDir}/batch_${String(i + 1).padStart(3, '0')}`);\n}\n\nconst mkdirCmd = `mkdir -p \"${mdOutputDir}\" \"${batchDirs.join('\" \"')}\"`;\n\nconsole.log(`将创建${totalBatches}个批次目录`);\n\nreturn [{\n  json: {\n    timestamp: timestamp,\n    documents: documents,\n    total_docs: documents.length,\n    batches: totalBatches,\n    output_dir: mdOutputDir,\n    batch_size: batchSize,\n    stats: $json.stats,\n    mkdir_cmd: mkdirCmd\n  }\n}];"
+      },
+      "id": "348f221b-49ac-4391-9b5a-066059a1b761",
+      "name": "准备批次目录",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "准备Markdown批次目录结构"
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.mkdir_cmd }}"
+      },
+      "id": "ffb77ebe-7e20-438f-a47a-f02f4626b850",
+      "name": "创建目录结构",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        672,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "创建所有批次目录"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 展开documents为单个item,准备逐个写入\n// 从准备批次目录节点获取完整数据\nconst prepareResult = $('准备批次目录').first().json;\nconst documents = prepareResult.documents;\nconst mdOutputDir = prepareResult.output_dir;\nconst batchSize = prepareResult.batch_size;\nconst timestamp = prepareResult.timestamp;\n\nif (!documents || documents.length === 0) {\n  console.log('警告: 没有文档需要写入');\n  return [];\n}\n\nconst result = documents.map((doc, index) => {\n  const batchIdx = Math.floor(index / batchSize) + 1;\n  const batchDir = `${mdOutputDir}/batch_${String(batchIdx).padStart(3, '0')}`;\n  const filename = `${doc.doc_id}.md`;\n  const filepath = `${batchDir}/${filename}`;\n  \n  // 添加frontmatter\n  const frontmatter = `---\\ntitle: ${doc.title}\\ndoc_id: ${doc.doc_id}\\n---\\n\\n`;\n  const content = frontmatter + doc.content;\n  \n  return {\n    json: {\n      doc_id: doc.doc_id,\n      filepath: filepath,\n      batch_idx: batchIdx\n    },\n    binary: {\n      data: {\n        data: Buffer.from(content, 'utf-8').toString('base64'),\n        mimeType: 'text/markdown',\n        fileName: filename\n      }\n    }\n  };\n});\n\nconsole.log(`准备写入${result.length}个Markdown文件`);\n\nreturn result;"
+      },
+      "id": "7d974fba-5b79-45a3-beed-b7e788e8ea5a",
+      "name": "展开文档列表",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "将documents数组展开为单个item"
+    },
+    {
+      "parameters": {
+        "fileName": "={{ $json.filepath }}",
+        "options": {}
+      },
+      "id": "027a0b15-a2b8-4dcc-b398-f12dc8458803",
+      "name": "写入Markdown文件",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "逐个写入Markdown文件"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备复制文件到持久化目录的命令\nconst prepareResult = $('准备批次目录').first().json;\nconst mdOutputDir = prepareResult.output_dir;\nconst persistentDir = '/home/node/.n8n/knowledge_base';\n\n// 构建复制命令\nconst copyCmd = `mkdir -p \"${persistentDir}\" && cp -r \"${mdOutputDir}\" \"${persistentDir}/\"`;\n\nconsole.log('准备复制文件到持久化目录:', persistentDir);\n\nreturn [{\n  json: {\n    copy_cmd: copyCmd,\n    source_dir: mdOutputDir,\n    target_dir: persistentDir,\n    timestamp: prepareResult.timestamp\n  }\n}];"
+      },
+      "id": "4cb51979-73a8-4a38-9e4e-4ab718be83e7",
+      "name": "准备复制到持久化目录",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "准备将文件复制到n8n持久化数据目录"
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.copy_cmd }}"
+      },
+      "id": "ef55ba68-a58c-4697-abdb-d3edfc16fdb5",
+      "name": "复制到持久化目录",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1568,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "执行复制命令,将文件复制到持久化目录"
+    },
+    {
+      "parameters": {
+        "command": "=rm -f {{ $('准备文件数据').first().json.input_file }} {{ $('准备文件数据').first().json.output_file }}"
+      },
+      "id": "a4aab33f-b5d7-42cf-918e-ea0438ff1fa4",
+      "name": "清理临时文件",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -144
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "删除临时JSON文件"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 统计写入结果\nconst mdGenResult = $('准备批次目录').first().json;\nconst writtenFiles = $('写入Markdown文件').all();\n\nconst message = `知识库预处理完成: 生成${writtenFiles.length}个Markdown文件到${mdGenResult.batches}个批次目录`;\nconsole.log(message);\n\nreturn [{\n  json: {\n    timestamp: mdGenResult.timestamp,\n    knowledge_processed: true,\n    stats: mdGenResult.stats,\n    output_dir: mdGenResult.output_dir,\n    total_docs: mdGenResult.total_docs,\n    md_files: writtenFiles.length,\n    batches: mdGenResult.batches,\n    message: message\n  }\n}];"
+      },
+      "id": "59cb7606-fb4b-4f43-8d9f-19983f71dd38",
+      "name": "解析知识库处理结果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -160
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "解析Python脚本执行结果"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 更新进度并判断是否继续\nconst syncLogId = $('创建同步日志').first().json.sync_log_id;\nconst insertedItems = $('逐条插入PostgreSQL').all();\nconst processedCount = insertedItems.length;\n\n// 从查询结果获取offset信息\nconst sourceItems = $('查询待同步数据').all();\nconst currentOffset = sourceItems.length > 0 ? sourceItems[0].json.current_offset : 0;\nconst sourceCount = sourceItems.length;  // 查询到的原始数据量\n\nconst maxSyncedBugId = $('准备查询参数').first().json.max_synced_bug_id;\n\n// 🔥 关键修复: 计算本次实际处理的最大bug_id\nconst processedBugIds = insertedItems.map(item => item.json.bug_id || 0);\nconst currentMaxBugId = processedBugIds.length > 0 ? Math.max(...processedBugIds) : maxSyncedBugId;\n\n// 获取知识库处理结果\nconst knowledgeResult = $('解析知识库处理结果').first();\nconst knowledgeStats = knowledgeResult ? knowledgeResult.json.stats : null;\n\nconsole.log(`查询到${sourceCount}条, 过滤后插入${processedCount}条, 最大bug_id: ${currentMaxBugId}`);\nif (knowledgeStats) {\n  console.log(`知识库: 生成${knowledgeStats.total_docs}个文档, ${knowledgeStats.md_files}个MD文件`);\n}\n\n// 判断是否继续: 基于查询到的原始数据量,而非插入数量\nconst shouldContinue = sourceCount >= 500;\n\nreturn [{\n  json: {\n    sync_log_id: syncLogId,\n    records_processed: processedCount,\n    next_offset: currentOffset + 500,\n    should_continue: shouldContinue,\n    max_synced_bug_id: maxSyncedBugId,\n    current_max_bug_id: currentMaxBugId,  // 本次处理的最大bug_id\n    knowledge_stats: knowledgeStats\n  }\n}];"
+      },
+      "id": "4e934606-0af1-494a-98e1-130f7a7f8474",
+      "name": "更新处理进度",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        336
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 没有新数据时，准备继续下一批的参数\nconst syncLogId = $('创建同步日志').first().json.sync_log_id;\nconst sourceItems = $('查询待同步数据').all();\nconst currentOffset = sourceItems.length > 0 ? sourceItems[0].json.current_offset : 0;\nconst sourceCount = sourceItems.length;\nconst maxSyncedBugId = $('准备查询参数').first().json.max_synced_bug_id;\n\nconsole.log(`本批${sourceCount}条数据全部已存在，跳过插入，继续下一批`);\n\n// 判断是否继续\nconst shouldContinue = sourceCount >= 500;\n\nreturn [{\n  json: {\n    sync_log_id: syncLogId,\n    records_processed: 0,  // 实际插入0条\n    next_offset: currentOffset + 500,\n    should_continue: shouldContinue,\n    max_synced_bug_id: maxSyncedBugId,\n    current_max_bug_id: maxSyncedBugId,  // 没有新数据，保持原值\n    skipped: true\n  }\n}];"
+      },
+      "id": "79d3a6c3-5f3e-4619-a7d1-1a960d450414",
+      "name": "准备跳过进度",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1040,
+        592
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "当本批数据全部已存在时，跳过插入但继续判断下一批"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_continue }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "897c36e6-5cc5-40b2-9ddd-079a5cbfa9e3",
+      "name": "判断是否继续",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -544,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 准备下一批次参数\nreturn [{\n  json: {\n    offset: $json.next_offset,\n    max_synced_bug_id: $json.max_synced_bug_id,\n    sync_log_id: $json.sync_log_id\n  }\n}];"
+      },
+      "id": "bf943f68-c550-4490-822b-cb0ed4de8f26",
+      "name": "准备下一批",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        608
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE mantis.sync_log \nSET \n  sync_status = 'SUCCESS',\n  end_time = NOW(),\n  execution_time_seconds = EXTRACT(EPOCH FROM (NOW() - start_time))::INTEGER,\n  last_synced_timestamp = NOW(),\n  last_synced_bug_id = (SELECT MAX(bug_id) FROM mantis.bug_analysis)\nWHERE id = {{ $('创建同步日志').first().json.sync_log_id }};",
+        "options": {}
+      },
+      "id": "71d27fb7-bc42-4dc8-9de9-b102aba0f726",
+      "name": "完成同步日志",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1568,
+        864
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE mantis.sync_config \nSET config_value = NOW()::TEXT\nWHERE config_key = 'last_sync_timestamp';",
+        "options": {}
+      },
+      "id": "f3c4ee66-a1cd-4e07-a3de-167b0e3fc8de",
+      "name": "更新同步配置",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1296,
+        848
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  COUNT(*) as total_records,\n  MAX(last_updated_at) as latest_update,\n  MIN(registered_at) as earliest_create\nFROM mantis.bug_analysis;",
+        "options": {}
+      },
+      "id": "03674b56-f57e-4c50-a91d-0dfb43b5361a",
+      "name": "获取最终统计",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.1,
+      "position": [
+        -1040,
+        832
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "tWcUIJhVg6bDlGDc",
+          "name": "TargetDB"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "65f0505b-d57e-4e83-8006-fc98219a2a14",
+      "name": "定时触发_每2h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -2800,
+        672
+      ],
+      "notes": "每2h自动执行一次，快速同步存量数据"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "查询已同步的最大BugID": {
+      "main": [
+        [
+          {
+            "node": "创建同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "创建同步日志": {
+      "main": [
+        [
+          {
+            "node": "准备查询参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备查询参数": {
+      "main": [
+        [
+          {
+            "node": "查询待同步数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询待同步数据": {
+      "main": [
+        [
+          {
+            "node": "判断是否有数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否有数据": {
+      "main": [
+        [
+          {
+            "node": "查询已存在的BugID列表",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "完成同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询已存在的BugID列表": {
+      "main": [
+        [
+          {
+            "node": "过滤新数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "过滤新数据": {
+      "main": [
+        [
+          {
+            "node": "判断是否有新数据要插入",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否有新数据要插入": {
+      "main": [
+        [
+          {
+            "node": "逐条插入PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "准备跳过进度",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "逐条插入PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "准备知识库数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备知识库数据": {
+      "main": [
+        [
+          {
+            "node": "判断是否需要处理知识库",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否需要处理知识库": {
+      "main": [
+        [
+          {
+            "node": "准备文件数据",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "更新处理进度",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备文件数据": {
+      "main": [
+        [
+          {
+            "node": "写入JSON文件",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "写入JSON文件": {
+      "main": [
+        [
+          {
+            "node": "执行-处理向量化",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "执行-处理向量化": {
+      "main": [
+        [
+          {
+            "node": "准备批次目录",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备批次目录": {
+      "main": [
+        [
+          {
+            "node": "创建目录结构",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "创建目录结构": {
+      "main": [
+        [
+          {
+            "node": "展开文档列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "展开文档列表": {
+      "main": [
+        [
+          {
+            "node": "写入Markdown文件",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "写入Markdown文件": {
+      "main": [
+        [
+          {
+            "node": "准备复制到持久化目录",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备复制到持久化目录": {
+      "main": [
+        [
+          {
+            "node": "复制到持久化目录",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "复制到持久化目录": {
+      "main": [
+        [
+          {
+            "node": "清理临时文件",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "清理临时文件": {
+      "main": [
+        [
+          {
+            "node": "解析知识库处理结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "解析知识库处理结果": {
+      "main": [
+        [
+          {
+            "node": "更新处理进度",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新处理进度": {
+      "main": [
+        [
+          {
+            "node": "判断是否继续",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备跳过进度": {
+      "main": [
+        [
+          {
+            "node": "判断是否继续",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "判断是否继续": {
+      "main": [
+        [
+          {
+            "node": "准备下一批",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "完成同步日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备下一批": {
+      "main": [
+        [
+          {
+            "node": "查询待同步数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "完成同步日志": {
+      "main": [
+        [
+          {
+            "node": "更新同步配置",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新同步配置": {
+      "main": [
+        [
+          {
+            "node": "获取最终统计",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "定时触发_每2h": {
+      "main": [
+        [
+          {
+            "node": "查询已同步的最大BugID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "10c837e9-b7fe-456f-8eaf-8e4c7dd879a9",
+  "meta": {
+    "instanceId": "1003d7a4418464b97d5dcd6234164bb132b89fde605b38f31cba0abf5a7b1b81"
+  },
+  "id": "5Yqzhma2r7EOgr2B",
+  "tags": [
+    {
+      "createdAt": "2025-10-10T08:32:49.722Z",
+      "updatedAt": "2025-10-10T08:32:49.722Z",
+      "id": "LzKc1zENSTrzLIN6",
+      "name": "Mantis同步"
+    }
+  ]
+}
